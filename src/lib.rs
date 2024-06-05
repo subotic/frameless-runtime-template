@@ -210,11 +210,15 @@ const HEADER_KEY: &[u8] = b"header";
 /// next block.
 const EXTRINSICS_KEY: &[u8] = b"extrinsics";
 
+/// Key used to store the code of the runtime.
+const CODE_KEY: &[u8] = b":code";
+
 /// The block number type. You should not change this.
 type BlockNumber = u32;
 
 /// Signature type. We use `sr25519` crypto. You should not change this.
 type Signature = sp_core::sr25519::Signature;
+
 /// Account id type is the public key. We use `sr25519` crypto.
 ///
 /// be aware of using the right crypto type when using `sp_keyring` and similar crates.
@@ -226,6 +230,7 @@ type AccountId = sp_core::sr25519::Public;
 enum Call {
 	SetValue { value: u32 },
 	UpgradeCode { code: Vec<u8> },
+	Transfer { to: AccountId, amount: u32 },
 }
 
 #[derive(TypeInfo, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -271,6 +276,7 @@ impl sp_runtime::traits::Extrinsic for SignedExtrinsic {
 		Some(SignedExtrinsic { function: call, signature: None })
 	}
 	fn is_signed(&self) -> Option<bool> {
+		// FIXME: Implement signature verification
 		Some(self.signature.is_some())
 	}
 }
@@ -341,6 +347,7 @@ struct RuntimeGenesis {
 // This impl block contains the core runtime api implementations. It contains good starting points
 // denoted as a `FIXME`.
 impl Runtime {
+	/// Initialize block. This is called at the beginning of every block.
 	pub(crate) fn do_initialize_block(
 		header: &<Block as BlockT>::Header,
 	) -> ExtrinsicInclusionMode {
@@ -349,6 +356,7 @@ impl Runtime {
 		ExtrinsicInclusionMode::AllExtrinsics
 	}
 
+	// Finalize block. This is called at the end of every block.
 	pub(crate) fn do_finalize_block() -> <Block as BlockT>::Header {
 		// fetch the header that was given to us at the beginning of the block.
 		let mut header = Self::get_state::<<Block as BlockT>::Header>(HEADER_KEY)
@@ -376,6 +384,15 @@ impl Runtime {
 	/// In our template, we call into this from both block authoring, and block import.
 	pub(crate) fn do_apply_extrinsic(ext: <Block as BlockT>::Extrinsic) -> ApplyExtrinsicResult {
 		let dispatch_outcome = match ext.clone().function {
+			Call::SetValue { value } => {
+				sp_io::storage::set(&VALUE_KEY, &value.encode());
+				Ok(())
+			},
+			Call::UpgradeCode { code } => {
+				sp_io::storage::set(&CODE_KEY, &code.encode());
+				Ok(())
+			},
+			// Call::Transfer { from_account, to_account, amount } => Ok(()),
 			_ => Ok(()),
 		};
 
@@ -427,7 +444,7 @@ impl Runtime {
 
 	pub(crate) fn do_get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
 		match id {
-			Some(preset_id) =>
+			Some(preset_id) => {
 				if preset_id.as_ref() == "special-preset-1".as_bytes() {
 					Some(
 						serde_json::to_string(&RuntimeGenesis { value: 42 * 2 })
@@ -437,7 +454,8 @@ impl Runtime {
 					)
 				} else {
 					None
-				},
+				}
+			},
 			// none indicates the default preset.
 			None => Some(
 				serde_json::to_string(&RuntimeGenesis { value: 42 })
