@@ -162,6 +162,11 @@
 //!
 //! ## More RPC Play
 //!
+//! This will return a list with all possible RPC methods:
+//! ```text
+//! wscat -c 127.0.0.1:9944 -x '{"jsonrpc":"2.0", "id":1, "method":"get_methods" }' | jq
+//! ```
+//!
 //! Try the following RPC methods on both your node, and a live network, like Westend
 //! (`wss://polkadot-rpc.dwellir.com`)
 //!
@@ -187,6 +192,11 @@ const LOG_TARGET: &'static str = "frameless";
 use log::info;
 use parity_scale_codec::{Compact, Decode, Encode};
 use sp_api::impl_runtime_apis;
+use sp_core::sr25519::{Pair as Sr25519Pair, Public as Sr25519Public};
+use sp_core::{
+	crypto::{Derive, DeriveJunction, Ss58Codec, DEV_PHRASE},
+	Pair, Public,
+};
 use sp_core::{hexdisplay::HexDisplay, OpaqueMetadata, H256};
 use sp_runtime::{
 	create_runtime_str, generic,
@@ -200,18 +210,20 @@ use sp_version::RuntimeVersion;
 ///
 /// Hex: 0x76616c7565
 const VALUE_KEY: &[u8] = b"value";
+
 /// Temporary key used to store the header. This should always be clear at the end of the block.
 ///
 /// Hex: 0x686561646572
 const HEADER_KEY: &[u8] = b"header";
+
 /// Key used to store all extrinsics in a block.
 ///
 /// Should always remain in state at the end of the block, and be flushed at the beginning of the
 /// next block.
 const EXTRINSICS_KEY: &[u8] = b"extrinsics";
 
-/// Key used to store the code of the runtime.
-const CODE_KEY: &[u8] = b":code";
+/// Account prefix
+const ACCOUNT_BALANCE_KEY_PREFIX: &[u8] = b"account_balance";
 
 /// The block number type. You should not change this.
 type BlockNumber = u32;
@@ -224,13 +236,15 @@ type Signature = sp_core::sr25519::Signature;
 /// be aware of using the right crypto type when using `sp_keyring` and similar crates.
 type AccountId = sp_core::sr25519::Public;
 
+type Balance = u128;
+
 #[derive(
 	Debug, Encode, Decode, TypeInfo, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 enum Call {
 	SetValue { value: u32 },
 	UpgradeCode { code: Vec<u8> },
-	Transfer { to: AccountId, amount: u32 },
+	Transfer { from: AccountId, to: AccountId, amount: Balance },
 }
 
 #[derive(TypeInfo, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -351,8 +365,8 @@ impl Runtime {
 	pub(crate) fn do_initialize_block(
 		header: &<Block as BlockT>::Header,
 	) -> ExtrinsicInclusionMode {
-		sp_io::storage::set(&HEADER_KEY, &header.encode());
-		sp_io::storage::clear(&EXTRINSICS_KEY);
+		sp_io::storage::set(HEADER_KEY, &header.encode());
+		sp_io::storage::clear(EXTRINSICS_KEY);
 		ExtrinsicInclusionMode::AllExtrinsics
 	}
 
@@ -363,7 +377,7 @@ impl Runtime {
 			.expect("We initialized with header, it never got mutated, qed");
 
 		// and make sure to _remove_ it.
-		sp_io::storage::clear(&HEADER_KEY);
+		sp_io::storage::clear(HEADER_KEY);
 
 		// This print is only for logging and debugging. Remove it.
 		Runtime::print_state();
@@ -385,15 +399,46 @@ impl Runtime {
 	pub(crate) fn do_apply_extrinsic(ext: <Block as BlockT>::Extrinsic) -> ApplyExtrinsicResult {
 		let dispatch_outcome = match ext.clone().function {
 			Call::SetValue { value } => {
-				sp_io::storage::set(&VALUE_KEY, &value.encode());
+				sp_io::storage::set(VALUE_KEY, &value.encode());
 				Ok(())
 			},
 			Call::UpgradeCode { code } => {
-				sp_io::storage::set(&CODE_KEY, &code.encode());
+				sp_io::storage::set(sp_storage::well_known_keys::CODE, &code.encode());
 				Ok(())
 			},
-			// Call::Transfer { from_account, to_account, amount } => Ok(()),
-			_ => Ok(()),
+			Call::Transfer { from, to, amount } => {
+				// define from balance key
+				let mut from_balance_key = ACCOUNT_BALANCE_KEY_PREFIX.to_vec();
+				from_balance_key.extend_from_slice(&from);
+
+				// define to balance key
+				let mut to_balance_key = ACCOUNT_BALANCE_KEY_PREFIX.to_vec();
+				to_balance_key.extend_from_slice(&to);
+
+				// get from balance
+				let from_balance: Balance = Self::get_state(&from_balance_key).unwrap_or(0);
+
+				// check if from has enough balance
+				// if not return error
+				if from_balance < amount {
+					return Err(
+						sp_runtime::transaction_validity::TransactionValidityError::Invalid(
+							sp_runtime::transaction_validity::InvalidTransaction::Payment,
+						),
+					);
+				}
+
+				// deduct from from balance
+				Self::mutate_state(&from_balance_key, |from_balance: &mut Balance| {
+					*from_balance = from_balance.saturating_sub(amount);
+				});
+
+				// add to to balance
+				Self::mutate_state(&to_balance_key, |to_balance: &mut Balance| {
+					*to_balance = to_balance.saturating_add(amount);
+				});
+				Ok(())
+			},
 		};
 
 		log::debug!(target: LOG_TARGET, "dispatched {:?}, outcome = {:?}", ext, dispatch_outcome);
@@ -411,7 +456,7 @@ impl Runtime {
 		// clear any previous extrinsics. data.
 		// NOTE: Look into FRAME, namely the system and executive crates and see if this is any
 		// different in FRAME?
-		sp_io::storage::clear(&EXTRINSICS_KEY);
+		sp_io::storage::clear(EXTRINSICS_KEY);
 
 		for extrinsic in block.clone().extrinsics {
 			// the panic here is expected -- remember that we are in the block import code path now.
@@ -420,7 +465,7 @@ impl Runtime {
 		}
 
 		// check state root. Clean the state prior to asking for the root.
-		sp_io::storage::clear(&HEADER_KEY);
+		sp_io::storage::clear(HEADER_KEY);
 
 		Self::print_state();
 
@@ -438,7 +483,7 @@ impl Runtime {
 	}
 
 	pub(crate) fn do_build_state(runtime_genesis: RuntimeGenesis) -> sp_genesis_builder::Result {
-		sp_io::storage::set(&VALUE_KEY, &runtime_genesis.value.encode());
+		sp_io::storage::set(VALUE_KEY, &runtime_genesis.value.encode());
 		Ok(())
 	}
 
@@ -718,7 +763,7 @@ mod tests {
 		// this is just to demonstrate to you that you should always wrap any code containing host
 		// functions in `TestExternalities`.
 		TestExternalities::new_empty().execute_with(|| {
-			println!("it works! {:?}", sp_io::storage::get(&VALUE_KEY));
+			println!("it works! {:?}", sp_io::storage::get(VALUE_KEY));
 		})
 	}
 
@@ -729,7 +774,12 @@ mod tests {
 		// ```
 		// wscat -c ws://127.0.0.1:9944 -x '{"jsonrpc":"2.0", "id":1, "method":"author_submitExtrinsic", "params": ["0x123"]}'
 		// ```
-		let call = Call::SetValue { value: 1234 };
+
+		let alice =
+			Sr25519Pair::from_string("//Alice", None).expect("key derivation should succeed");
+		let bob = Sr25519Pair::from_string("//Bob", None).expect("key derivation should succeed");
+
+		let call = Call::Transfer { from: alice.public(), to: bob.public(), amount: 100 };
 		let unsigned_ext = SignedExtrinsic::new(call, None).unwrap();
 
 		println!(
