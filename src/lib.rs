@@ -182,6 +182,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use scale_info::TypeInfo;
+use sp_core::ByteArray;
 // imports the `substrate`'s WASM-compatible standard library. This should give you all standard
 // items like `vec!`. Do NOT bring in `std` from Rust, as this will not work in WASM.
 use sp_std::prelude::*;
@@ -356,6 +357,10 @@ impl Runtime {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RuntimeGenesis {
 	pub(crate) value: u32,
+	pub(crate) alice_account: AccountId,
+	pub(crate) alice_balance: Balance,
+	pub(crate) bob_account: AccountId,
+	pub(crate) bob_balance: Balance,
 }
 
 // This impl block contains the core runtime api implementations. It contains good starting points
@@ -484,6 +489,13 @@ impl Runtime {
 
 	pub(crate) fn do_build_state(runtime_genesis: RuntimeGenesis) -> sp_genesis_builder::Result {
 		sp_io::storage::set(VALUE_KEY, &runtime_genesis.value.encode());
+
+		let alice_key = ACCOUNT_BALANCE_KEY_PREFIX.to_vec().extend(&runtime_genesis.alice_account);
+		sp_io::storage::set(alice_key, &runtime_genesis.alice_balance.encode());
+
+		let bob_key = ACCOUNT_BALANCE_KEY_PREFIX.to_vec().extend(&runtime_genesis.bob_account);
+		sp_io::storage::set(bob_key, &runtime_genesis.bob_balance.encode());
+
 		Ok(())
 	}
 
@@ -492,10 +504,20 @@ impl Runtime {
 			Some(preset_id) => {
 				if preset_id.as_ref() == "special-preset-1".as_bytes() {
 					Some(
-						serde_json::to_string(&RuntimeGenesis { value: 42 * 2 })
-							.unwrap()
-							.as_bytes()
-							.to_vec(),
+						serde_json::to_string(&RuntimeGenesis {
+							value: 42 * 2,
+							alice_account: AccountId::from_string(
+								"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+							),
+							alice_balance: 1000,
+							bob_account: AccountId::from_string(
+								"5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
+							),
+							bob_balance: 1000,
+						})
+						.unwrap()
+						.as_bytes()
+						.to_vec(),
 					)
 				} else {
 					None
@@ -503,10 +525,20 @@ impl Runtime {
 			},
 			// none indicates the default preset.
 			None => Some(
-				serde_json::to_string(&RuntimeGenesis { value: 42 })
-					.unwrap()
-					.as_bytes()
-					.to_vec(),
+				serde_json::to_string(&RuntimeGenesis {
+					value: 42 * 2,
+					alice_account: AccountId::from_string(
+						"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+					),
+					alice_balance: 1000,
+					bob_account: AccountId::from_string(
+						"5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
+					),
+					bob_balance: 1000,
+				})
+				.unwrap()
+				.as_bytes()
+				.to_vec(),
 			),
 		}
 	}
